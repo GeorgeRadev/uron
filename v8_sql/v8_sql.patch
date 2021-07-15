@@ -1,0 +1,241 @@
+diff --git a/src/d8/d8.cc b/src/d8/d8.cc
+index e2892a4e82..a0bd39fb95 100644
+--- a/src/d8/d8.cc
++++ b/src/d8/d8.cc
+@@ -5283,6 +5283,22 @@ int Shell::Main(int argc, char* argv[]) {
+ 
+ int main(int argc, char* argv[]) { return v8::Shell::Main(argc, argv); }
+ 
++/*
++gm x64.release d8
++gm x64.debug d8
++
++(gdb)
++set substitute-path ../../    /home/dead_one/Projects/C/v8/
++info breakpoints
++info locals
++info variables
++info args
++
++parameter = "value";
++sql = SET :parameter = "str" from table;
++console.log(SET "var" = 8;)
++*/
++
+ #undef CHECK
+ #undef DCHECK
+ #undef TRACE_BS
+diff --git a/src/parsing/parser-base.h b/src/parsing/parser-base.h
+index 108b11edc8..210494e83f 100644
+--- a/src/parsing/parser-base.h
++++ b/src/parsing/parser-base.h
+@@ -1165,6 +1165,7 @@ class ParserBase {
+                                            int seen_variables);
+ 
+   ExpressionT ParseArrayLiteral();
++  ExpressionT ParseSQLLiteral();
+ 
+   inline static bool IsAccessor(ParsePropertyKind kind) {
+     return base::IsInRange(kind, ParsePropertyKind::kAccessorGetter,
+@@ -1630,7 +1631,7 @@ ParserBase<Impl>::FunctionState::~FunctionState() {
+ 
+ template <typename Impl>
+ void ParserBase<Impl>::ReportUnexpectedToken(Token::Value token) {
+-  return impl()->ReportUnexpectedTokenAt(scanner_->location(), token);
++	impl()->ReportUnexpectedTokenAt(scanner_->location(), token);
+ }
+ 
+ template <typename Impl>
+@@ -1892,6 +1893,9 @@ ParserBase<Impl>::ParsePrimaryExpression() {
+     case Token::LBRACE:
+       return ParseObjectLiteral();
+ 
++    case Token::SQL:
++      return ParseSQLLiteral();
++
+     case Token::LPAREN: {
+       Consume(Token::LPAREN);
+       if (Check(Token::RPAREN)) {
+@@ -2762,6 +2766,76 @@ typename ParserBase<Impl>::ExpressionT ParserBase<Impl>::ParseObjectLiteral() {
+                                   pos, has_rest_property, home_object));
+ }
+ 
++template <typename Impl>
++typename ParserBase<Impl>::ExpressionT ParserBase<Impl>::ParseSQLLiteral() {
++	// SQLLiteral :: SQL EXPRESSION WITH :VAR ';'
++	// starts with Token::SQL_*
++	// parameters are Token::COLON and identifier
++	// ends with Token::SEMICOLON
++	DCHECK_EQ(peek(), Token::SQL);
++
++	int pos = peek_position();
++	// int pos_end = peek_end_position();
++	std::string sql;
++
++	std::vector<ExpressionT> sqlParameters;
++	ExpressionListT sqlParametersArray(pointer_buffer());
++
++	Token::Value token = peek();
++	do {
++		// fprintf(stderr, "ParseSQLLiteral token: %s\n", Token::Name(token));
++
++		if (token == Token::COLON) {
++			Consume(token);
++			token = peek();
++
++			if (token == Token::STRING) {
++				// we have string constant for escaping
++				sqlParameters.push_back(factory()->NewStringLiteral(impl()->GetSymbol(), pos));
++				sql.append("? ");
++			} else {
++				// next one should be variable reference
++				ExpressionT lhsExpression = ParseLeftHandSideExpression();
++				if (lhsExpression->IsFailureExpression()) {
++					return lhsExpression;
++				}
++				// if parsing is ok - use it as sql escaping
++				sqlParameters.push_back(lhsExpression);
++				sql.append("? ");
++			}
++		} else if (token == Token::STRING) {
++			// we have string constant for escaping
++			Consume(token);
++			sqlParameters.push_back(factory()->NewStringLiteral(impl()->GetSymbol(), pos));
++			sql.append("? ");
++		} else {
++			// add to the sql value
++			Consume(token);
++			const char *tokenString = Token::String(token);
++			if (tokenString != nullptr) {
++				sql.append(tokenString);
++			} else {
++				const AstRawString *currentSymbol = scanner()->CurrentSymbol(ast_value_factory());
++				sql.append((const char*) currentSymbol->raw_data(),currentSymbol->byte_length());
++			}
++			sql.append(" ");
++		}
++
++		// fprintf(stderr, "ParseSQLLiteral sql: %s\n", sql.c_str());
++		token = peek();
++	}while (token != Token::SEMICOLON);
++	Consume(token);
++
++	// create array like:  [sql, ... parameters:lhsExpressions]
++	sqlParametersArray.Add(factory()->NewStringLiteral(ast_value_factory()->GetOneByteString(sql.c_str()), pos));
++	for (unsigned long i = 0, l = sqlParameters.size(); i < l; i++) {
++		sqlParametersArray.Add(sqlParameters[i]);
++	}
++
++	// create array
++	return factory()->NewArrayLiteral(sqlParametersArray, false, pos);
++}
++
+ template <typename Impl>
+ void ParserBase<Impl>::ParseArguments(
+     typename ParserBase<Impl>::ExpressionListT* args, bool* has_spread,
+diff --git a/src/parsing/preparser.h b/src/parsing/preparser.h
+index 1949e7f8a7..d455942324 100644
+--- a/src/parsing/preparser.h
++++ b/src/parsing/preparser.h
+@@ -527,6 +527,9 @@ class PreParserFactory {
+                                        int pos) {
+     return PreParserExpression::Default();
+   }
++  PreParserExpression NewStringLiteral(const AstRawString* string, int pos) {
++    return PreParserExpression::Default();
++  }
+   PreParserExpression NewNumberLiteral(double number,
+                                        int pos) {
+     return PreParserExpression::Default();
+diff --git a/src/parsing/scanner-inl.h b/src/parsing/scanner-inl.h
+index 0e191330c0..7ff525a13e 100644
+--- a/src/parsing/scanner-inl.h
++++ b/src/parsing/scanner-inl.h
+@@ -521,7 +521,15 @@ V8_INLINE Token::Value Scanner::ScanSingleToken() {
+           return ScanNumber(false);
+ 
+         case Token::IDENTIFIER:
+-          return ScanIdentifierOrKeyword();
++        {
++          Token::Value identifier = ScanIdentifierOrKeyword();
++          // check for SQL keyword
++          base::Vector<const uint8_t> chars = next().literal_chars.one_byte_literal();
++          if (Token::isSQLToken((const char*) chars.begin(), chars.length())) {
++            return Token::SQL;
++          }
++          return identifier;
++        }
+ 
+         default:
+           UNREACHABLE();
+diff --git a/src/parsing/scanner.h b/src/parsing/scanner.h
+index 3474f7270d..4b0d678021 100644
+--- a/src/parsing/scanner.h
++++ b/src/parsing/scanner.h
+@@ -438,13 +438,13 @@ class V8_EXPORT_PRIVATE Scanner {
+     bool CanAccessLiteral() const {
+       return token == Token::PRIVATE_NAME || token == Token::ILLEGAL ||
+              token == Token::ESCAPED_KEYWORD || token == Token::UNINITIALIZED ||
+-             token == Token::REGEXP_LITERAL ||
++             token == Token::REGEXP_LITERAL || token == Token::SQL ||
+              base::IsInRange(token, Token::NUMBER, Token::STRING) ||
+              Token::IsAnyIdentifier(token) || Token::IsKeyword(token) ||
+              base::IsInRange(token, Token::TEMPLATE_SPAN, Token::TEMPLATE_TAIL);
+     }
+     bool CanAccessRawLiteral() const {
+-      return token == Token::ILLEGAL || token == Token::UNINITIALIZED ||
++      return token == Token::ILLEGAL || token == Token::UNINITIALIZED || token == Token::SQL ||
+              base::IsInRange(token, Token::TEMPLATE_SPAN, Token::TEMPLATE_TAIL);
+     }
+ #endif  // DEBUG
+diff --git a/src/parsing/token.h b/src/parsing/token.h
+index dabbff0e0e..911dfa0823 100644
+--- a/src/parsing/token.h
++++ b/src/parsing/token.h
+@@ -199,6 +199,9 @@ namespace internal {
+   T(ILLEGAL, "ILLEGAL", 0)                                         \
+   T(ESCAPED_KEYWORD, nullptr, 0)                                   \
+                                                                    \
++  /* SQL token/keyword */                                          \
++  T(SQL, nullptr, 0)                                               \
++                                                                   \
+   /* Scanner-internal use only. */                                 \
+   T(WHITESPACE, nullptr, 0)                                        \
+   T(UNINITIALIZED, nullptr, 0)                                     \
+@@ -338,6 +341,36 @@ class V8_EXPORT_PRIVATE Token {
+     return precedence_[accept_IN][token];
+   }
+ 
++  // Return true if token is SQL one:
++  static bool isSQLToken(const char *token, const int token_len) {
++  	if (token_len < 3) {
++  		return false;
++  	}
++  	const char c0 = token[0];
++  	switch (c0) {
++  	  case 'A': return strncmp(token, "ALTER", token_len) == 0;
++  	  case 'C': {
++  	  	const char c1 = token[1];
++  	  	if (c1 == 'O') return strncmp(token, "COMMIT", token_len) == 0;
++  	  	if (c1 == 'R') return strncmp(token, "CREATE", token_len) == 0;
++  	  	return false;
++  	  }
++  	  case 'D': return strncmp(token, "DELETE", token_len) == 0;
++  	  case 'E': return strncmp(token, "EXECUTE", token_len) == 0;
++  	  case 'G': return strncmp(token, "GRANT", token_len) == 0;
++  	  case 'I': return strncmp(token, "INSERT", token_len) == 0;
++  	  case 'R': return strncmp(token, "ROLLBACK", token_len) == 0;
++  	  case 'S': {
++  	  	const char c2 = token[2];
++  	  	if (c2 == 'L') return strncmp(token, "SELECT", token_len) == 0;
++  	  	if (c2 == 'T') return strncmp(token, "SET", token_len) == 0;
++  	  	return false;
++  	  }
++  	  case 'U': return strncmp(token, "UPDATE", token_len) == 0;
++  	}
++  	return false;
++  }
++
+  private:
+   static const char* const name_[NUM_TOKENS];
+   static const char* const string_[NUM_TOKENS];
