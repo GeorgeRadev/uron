@@ -1,6 +1,6 @@
 #include "utils.hpp"
 
-namespace uron {
+namespace utils {
 
 std::map<std::string, builtin *> builtins;
 std::map<std::string, register_plugin> modules;

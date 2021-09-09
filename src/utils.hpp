@@ -9,6 +9,7 @@
 #include <uuid/uuid.h>
 
 #define V8_COMPRESS_POINTERS
+#define V8_31BIT_SMIS_ON_64BIT_ARCH
 #include <v8.h>
 
 namespace utils {

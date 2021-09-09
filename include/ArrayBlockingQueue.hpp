@@ -99,6 +99,18 @@ template <typename E> class ArrayBlockingQueue {
         }
     }
 
+    // take element from the queue; blocks if queue is empty
+    E *dequeue_nowait() {
+        std::unique_lock<std::mutex> lock(mutex);
+        if (count > 0) {
+            E *e = get();
+            notFull.notify_one();
+            return e;
+        } else {
+            return nullptr;
+        }
+    }
+
     // no assignments allowed
     ArrayBlockingQueue &operator=(const ArrayBlockingQueue &) = delete;
     ArrayBlockingQueue &operator=(ArrayBlockingQueue &&) = delete;

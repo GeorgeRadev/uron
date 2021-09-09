@@ -1,7 +1,0 @@
-
-response.setContentType("text/html")
-response.status(200)
-
-var sql = SELECT user WHERE user = 'test';
-response.send("login select: "+sql);
-

@@ -113,6 +113,7 @@ class HTTPMultiThreadServer {
                     } else {
                         for (int i = 0; i < handlers_count; i++) {
                             handlers[i] = std::thread(&threadServingHandler, this);
+                            handlers[i].detach();
                         }
                         initialized = true;
                     }
@@ -145,7 +146,7 @@ class HTTPMultiThreadServer {
         int client_socket;
         // wait for connections
 
-        fprintf(stderr, "Server started at port: %d\n", port);
+        fprintf(stderr, "{\"log\":\"Server started at port: %d\"}\r\n", port);
         while ((client_socket = accept(server_socket, (struct sockaddr *)&client, (socklen_t *)&c))) {
             char method[METHOD_LIMIT + 1];
             char uri[URI_LIMIT + 1];

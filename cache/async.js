@@ -1,4 +1,4 @@
 export default async function requestHandler(method, uri) {
-    print("request async method: " + method + " uri: " + uri);
-    print("eval = " + eval("23"));
+    log("request async method: " + method + " uri: " + uri);
+    log("eval = " + eval("23"));
 }
