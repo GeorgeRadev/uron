@@ -15,6 +15,8 @@
 #include "ResourceManager.hpp"
 #include "V8Functions.hpp"
 
+#define PUMP_LIMIT 5
+
 // https://gist.github.com/surusek/4c05e4dcac6b82d18a1a28e6742fc23e
 
 namespace util {
@@ -47,6 +49,7 @@ class V8Thread {
 
     util::ResourceManager *resourceManager;
     v8::Global<v8::Value> lastResult;
+    v8::Platform *platform;
 
     const char *arg;
     bool exit;
@@ -55,7 +58,7 @@ class V8Thread {
 
     void eventLoopThreadHandler() {
         // Creating platform
-        std::unique_ptr<v8::Platform> platform = v8::platform::NewDefaultPlatform(4);
+        std::unique_ptr<v8::Platform> platform = v8::platform::NewDefaultPlatform(2, v8::platform::IdleTaskSupport::kEnabled);
         // Initializing V8 VM
         v8::V8::InitializePlatform(platform.get());
         v8::V8::Initialize();
@@ -65,15 +68,19 @@ class V8Thread {
         v8::Isolate *isolate = v8::Isolate::New(create_params);
         // add to map
         isolateToThread[(void *)isolate] = this;
+
+        this->platform = platform.get();
         {
             v8::Isolate::Scope isolate_scope(isolate);
             // any Local should has this one first
             v8::HandleScope handle_scope(isolate);
 
             isolate->SetCaptureStackTraceForUncaughtExceptions(true, 1000, v8::StackTrace::kDetailed);
-            // Binding dynamic import() callback
+            // Binding dynamic import() callbacks
             isolate->SetHostImportModuleDynamicallyCallback(callDynamic);
             isolate->SetPromiseRejectCallback(PromiseRejectCallback);
+            isolate->SetPromiseHook(PromiseHook);
+            isolate->SetMicrotasksPolicy(v8::MicrotasksPolicy::kExplicit);
 
             v8::Local<v8::ObjectTemplate> global_ = v8::ObjectTemplate::New(isolate);
             {
@@ -101,7 +108,7 @@ class V8Thread {
             v8::Local<v8::Value> obj = globalInstance->Get(context_, v8::String::NewFromUtf8Literal(isolate, "core", v8::NewStringType::kNormal)).ToLocalChecked();
             v8::Local<v8::Object> coreInstance = v8::Local<v8::Object>::Cast(obj);
             coreInstance->Set(context_, v8::String::NewFromUtf8Literal(isolate, "global", v8::NewStringType::kNormal), globalInstance).Check();
-            
+
             {
                 // Enter this processor's context so all the remaining operations be executed in it
                 v8::Local<v8::Context> context = v8::Local<v8::Context>::New(isolate, context_);
@@ -159,16 +166,38 @@ class V8Thread {
     void enqueueTask(V8Task *task) { eventLoopQueue.enqueue(task); }
 
   private:
+    static void PromiseHook(v8::PromiseHookType type, v8::Local<v8::Promise> promise, v8::Local<v8::Value> parent) {
+        switch (type) {
+        case v8::PromiseHookType::kInit:
+            fputs("--init\n", stderr);
+            break;
+        case v8::PromiseHookType::kBefore:
+            fputs("--before\n", stderr);
+            break;
+        case v8::PromiseHookType::kResolve:
+            fputs("--resolve\n", stderr);
+            break;
+        case v8::PromiseHookType::kAfter:
+            fputs("--after\n", stderr);
+            break;
+        }
+    }
+
     static void include(const v8::FunctionCallbackInfo<v8::Value> &args) {
         if (args.Length() < 1) {
             return;
         }
-        v8::Isolate *isolate = args.GetIsolate();
+        auto isolate = args.GetIsolate();
+        v8::HandleScope scope(isolate);
 
         // Enter this processor's context so all the remaining operations be executed in it
         v8::Local<v8::Context> context = v8::Local<v8::Context>::New(isolate, isolate->GetCurrentContext());
         v8::Context::Scope context_scope(context);
         v8::Local<v8::Object> global = context->Global();
+
+        v8::Local<v8::Promise::Resolver> resolver = v8::Promise::Resolver::New(context).ToLocalChecked();
+        args.GetReturnValue().Set(resolver->GetPromise());
+
         v8::TryCatch try_catch(isolate);
 
         v8::Local<v8::String> name;
@@ -194,42 +223,69 @@ class V8Thread {
                                 v8::Local<v8::Value>(),       // source map url
                                 v8::False(isolate),           // is opaque
                                 v8::False(isolate),           // is WASM
-                                v8::False(isolate)            // is ES6 module
+                                v8::True(isolate)             // is ES6 module
         );
 
-        // compile function close
         v8::ScriptCompiler::Source basescript(source, origin);
-        auto maybeFunctionScript = v8::ScriptCompiler::CompileFunctionInContext(context, &basescript, 0, nullptr, 0, nullptr, v8::ScriptCompiler::kEagerCompile);
+        v8::MaybeLocal<v8::Module> maybeModule = v8::ScriptCompiler::CompileModule(isolate, &basescript);
 
-        if (try_catch.HasCaught()) {
-            // ReportException(isolate, try_catch);
-            v8::Local<v8::String> errorText = getExceptionText(isolate, try_catch);
-            // isolate->ThrowException(exception);
-            args.GetReturnValue().Set(errorText);
-            return;
+        if (!try_catch.HasCaught()) {
+            v8::Local<v8::Module> module;
+            if (maybeModule.ToLocal(&module)) {
+                v8::Maybe<bool> isModule = module->InstantiateModule(context, callResolve);
+                if (isModule.FromMaybe(false)) {
+                    v8::Local<v8::Value> result;
+                    if (module->Evaluate(context).ToLocal(&result)) {
+                        result = module->GetModuleNamespace();
+                        args.GetReturnValue().Set(result);
+                        return;
+                    } else {
+                        fprintf(stderr, "Error evaluating module!\n");
+                    }
+                } else {
+                    fprintf(stderr, "Error evaluating module!\n");
+                }
+            } else {
+                fprintf(stderr, "Error evaluating module!\n");
+            }
         }
 
-        // run the function closure
-        auto function = maybeFunctionScript.ToLocalChecked();
-        v8::MaybeLocal<v8::Value> callResult = function->Call(context, global, 0, nullptr);
-        v8::Local<v8::Value> result;
-        if (callResult.ToLocal(&result)) {
-            args.GetReturnValue().Set(result);
-        } else {
-            if (try_catch.HasCaught()) {
-                // ReportException(isolate, try_catch);
-                v8::Local<v8::String> errorText = getExceptionText(isolate, try_catch);
-                // isolate->ThrowException(exception);
-                args.GetReturnValue().Set(errorText);
-            }
+        /*
+                // compile function close
+                v8::ScriptCompiler::Source basescript(source, origin);
+                auto maybeFunctionScript = v8::ScriptCompiler::CompileFunctionInContext(context, &basescript, 0, nullptr, 0, nullptr, v8::ScriptCompiler::kEagerCompile);
+
+                if (!try_catch.HasCaught()) {
+                    // run the function closure
+                    auto function = maybeFunctionScript.ToLocalChecked();
+                    v8::MaybeLocal<v8::Value> callResult = function->Call(context, global, 0, nullptr);
+                    v8::Local<v8::Value> result;
+                    if (callResult.ToLocal(&result)) {
+                        args.GetReturnValue().Set(result);
+                        return;
+                    }
+                }
+        */
+        if (try_catch.HasCaught()) {
+            // Reject current scope
+            // interestingly try_catch cannot be retrown
+            v8::Local<v8::String> errorText = getExceptionText(isolate, try_catch);
+            auto res = resolver->Reject(context, errorText.As<v8::Value>());
+            return;
         }
     }
 
     static void getRequest(const v8::FunctionCallbackInfo<v8::Value> &args) {
         auto isolate = args.GetIsolate();
-        V8Thread *thread = getByIsolate(isolate);
-        auto context = isolate->GetCurrentContext();
         v8::HandleScope scope(isolate);
+        V8Thread *thread = getByIsolate(isolate);
+
+        for (int count = 0; v8::platform::PumpMessageLoop(thread->platform, isolate) && count < PUMP_LIMIT; count++) {
+            continue;
+        }
+        isolate->PerformMicrotaskCheckpoint();
+
+        auto context = isolate->GetCurrentContext();
         if (thread) {
             V8Task *task = thread->eventLoopQueue.dequeue_for(std::chrono::milliseconds(1000));
             if (task) {
@@ -257,8 +313,9 @@ class V8Thread {
 
     static void setResult(const v8::FunctionCallbackInfo<v8::Value> &args) {
         auto isolate = args.GetIsolate();
-        auto thread = getByIsolate(isolate);
         v8::HandleScope scope(isolate);
+
+        auto thread = getByIsolate(isolate);
         if (args.Length() > 0) {
             thread->lastResult.Reset(isolate, args[0]);
         } else {
@@ -325,18 +382,13 @@ class V8Thread {
         }
     }
 
-    static v8::Local<v8::String> getExceptionText(v8::Isolate *isolate, v8::TryCatch &try_catch) {
-        if (!try_catch.HasCaught()) {
-            return v8::String::NewFromUtf8(isolate, "").ToLocalChecked();
-        }
-        std::string errorMessage;
-        v8::String::Utf8Value exception(isolate, try_catch.Exception());
+    static std::string getExceptionString(v8::Isolate *isolate, v8::String::Utf8Value &exception, v8::Local<v8::Message> &message) {
+        std::string exceptionString;
         const char *exception_string = *exception;
-        v8::Local<v8::Message> message = try_catch.Message();
         if (message.IsEmpty()) {
             // V8 didn't provide any extra information about this error; just
             // print the exception.
-            errorMessage += exception_string;
+            exceptionString += exception_string;
         } else {
             // generate:
             // (filename):(line number): (message)
@@ -345,35 +397,44 @@ class V8Thread {
             v8::Local<v8::Context> context(isolate->GetCurrentContext());
             const char *filename_string = *filename;
             int linenum = message->GetLineNumber(context).FromJust();
-            errorMessage += filename_string;
-            errorMessage += ":";
+            exceptionString += filename_string;
+            exceptionString += ":";
             {
                 char buf[100];
                 sprintf(buf, "%d", linenum);
-                errorMessage += buf;
+                exceptionString += buf;
             }
-            errorMessage += ": ";
-            errorMessage += exception_string;
-            errorMessage += "\n";
+            exceptionString += ": ";
+            exceptionString += exception_string;
+            exceptionString += "\n";
 
             v8::String::Utf8Value sourceline(isolate, message->GetSourceLine(context).ToLocalChecked());
             const char *sourceline_string = *sourceline;
-            errorMessage += sourceline_string;
-            errorMessage += "\n";
+            exceptionString += sourceline_string;
+            exceptionString += "\n";
 
             // Print wavy underline (GetUnderline is deprecated).
             int start = message->GetStartColumn(context).FromJust();
             for (int i = 0; i < start; i++) {
-                errorMessage += " ";
+                exceptionString += " ";
             }
             int end = message->GetEndColumn(context).FromJust();
             for (int i = start; i < end; i++) {
-                errorMessage += "^";
+                exceptionString += "^";
             }
-            errorMessage += "\n";
+            exceptionString += "\n";
         }
-        fputs(errorMessage.c_str(), stderr);
-        return v8::String::NewFromUtf8(isolate, errorMessage.c_str()).ToLocalChecked();
+        return exceptionString;
+    }
+
+    static v8::Local<v8::String> getExceptionText(v8::Isolate *isolate, v8::TryCatch &try_catch) {
+        if (!try_catch.HasCaught()) {
+            return v8::String::NewFromUtf8(isolate, "").ToLocalChecked();
+        }
+        v8::String::Utf8Value exception(isolate, try_catch.Exception());
+        v8::Local<v8::Message> message = try_catch.Message();
+        std::string exceptionString = getExceptionString(isolate, exception, message);
+        return v8::String::NewFromUtf8(isolate, exceptionString.c_str()).ToLocalChecked();
     }
 
     static void ReportException(v8::Isolate *isolate, v8::TryCatch &try_catch) {
@@ -388,26 +449,10 @@ class V8Thread {
             // print the exception.
             fprintf(stderr, "%s\n", exception_string);
         } else {
-            // Print (filename):(line number): (message).
-            v8::String::Utf8Value filename(isolate, message->GetScriptOrigin().ResourceName());
+            v8::Local<v8::Message> message = try_catch.Message();
+            std::string exceptionString = getExceptionString(isolate, exception, message);
+            fputs(exceptionString.c_str(), stderr);
             v8::Local<v8::Context> context(isolate->GetCurrentContext());
-            const char *filename_string = *filename;
-            int linenum = message->GetLineNumber(context).FromJust();
-            fprintf(stderr, "%s:%i: %s\n", filename_string, linenum, exception_string);
-            // Print line of source code.
-            v8::String::Utf8Value sourceline(isolate, message->GetSourceLine(context).ToLocalChecked());
-            const char *sourceline_string = *sourceline;
-            fprintf(stderr, "%s\n", sourceline_string);
-            // Print wavy underline (GetUnderline is deprecated).
-            int start = message->GetStartColumn(context).FromJust();
-            for (int i = 0; i < start; i++) {
-                fprintf(stderr, " ");
-            }
-            int end = message->GetEndColumn(context).FromJust();
-            for (int i = start; i < end; i++) {
-                fprintf(stderr, "^");
-            }
-            fprintf(stderr, "\n");
             v8::Local<v8::Value> stack_trace_string;
             if (try_catch.StackTrace(context).ToLocal(&stack_trace_string) && stack_trace_string->IsString() && stack_trace_string.As<v8::String>()->Length() > 0) {
                 v8::String::Utf8Value stack_trace(isolate, stack_trace_string);
@@ -420,6 +465,8 @@ class V8Thread {
     static v8::MaybeLocal<v8::Module> loadModule(v8::Local<v8::Context> context, const char *name, const char *code) {
         // Convert char[] to VM's string type
         auto isolate = context->GetIsolate();
+        fprintf(stderr, "import: %s\n", name);
+
         v8::Local<v8::String> vcode = v8::String::NewFromUtf8(isolate, code).ToLocalChecked();
         // Create script origin to determine if it is module or not.
         // Only first and last argument matters; other ones are default values.
@@ -525,31 +572,26 @@ class V8Thread {
         v8::Local<v8::Message> message;
         // Assume that all objects are stack-traces.
         if (exception->IsObject()) {
+            v8::String::Utf8Value exceptionStr(isolate, exception);
             message = v8::Exception::CreateMessage(isolate, exception);
+            std::string error = getExceptionString(isolate, exceptionStr, message);
+            fputs(error.c_str(), stderr);
+        } else {
+            v8::String::Utf8Value exceptionStr(isolate, exception);
+            fputs(*exceptionStr, stderr);
         }
-        if (!exception->IsNativeError() && (message.IsEmpty() || message->GetStackTrace().IsEmpty())) {
-            // If there is no real Error object, manually create a stack trace.
-            exception = v8::Exception::Error(v8::String::NewFromUtf8Literal(isolate, "Unhandled Promise."));
-            message = v8::Exception::CreateMessage(isolate, exception);
-        }
+
         v8::Local<v8::Context> context = isolate->GetCurrentContext();
         v8::TryCatch try_catch(isolate);
         v8::Local<v8::Object> globalInstance = context->Global();
         v8::Local<v8::Value> func = globalInstance->Get(context, v8::String::NewFromUtf8Literal(isolate, "onUnhandledRejection", v8::NewStringType::kNormal)).ToLocalChecked();
-        if (func.IsEmpty()) {
-            return;
-        }
-        v8::Local<v8::Function> onUnhandledRejection = v8::Local<v8::Function>::Cast(func);
-        if (try_catch.HasCaught()) {
-            fprintf(stderr, "PromiseRejectCallback: Cast\n");
+        if (func->IsFunction()) {
+            v8::Local<v8::Function> onUnhandledRejection = v8::Local<v8::Function>::Cast(func);
+            v8::Local<v8::Value> argv[1] = {exception};
+            v8::MaybeLocal<v8::Value> result = onUnhandledRejection->Call(context, globalInstance, 1, argv);
             ReportException(isolate, try_catch);
-            return;
-        }
-        v8::Local<v8::Value> argv[1] = {exception};
-        v8::MaybeLocal<v8::Value> result = onUnhandledRejection->Call(context, globalInstance, 1, argv);
-        if (result.IsEmpty() && try_catch.HasCaught()) {
-            fprintf(stderr, "PromiseRejectCallback: Call\n");
-            ReportException(isolate, try_catch);
+        } else {
+            fputs("onUnhandledRejection not found in the current context\n", stderr);
         }
     }
 };

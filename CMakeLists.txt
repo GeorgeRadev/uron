@@ -9,7 +9,7 @@ include(GNUInstallDirs)
 
 #V8 is supposed to be build in the ../V8
 add_library(libv8_monolith STATIC IMPORTED)
-set_target_properties(libv8_monolith PROPERTIES IMPORTED_LOCATION "${CMAKE_CURRENT_SOURCE_DIR}/../v8/out.gn/x64.release.sample/obj/libv8_monolith.a")
+set_target_properties(libv8_monolith PROPERTIES IMPORTED_LOCATION "${CMAKE_CURRENT_SOURCE_DIR}/../v8/out.gn/x64.debug.sample/obj/libv8_monolith.a")
 set_target_properties(libv8_monolith PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/../v8/include")
 
 # add Postgres SQL

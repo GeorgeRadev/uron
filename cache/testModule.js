@@ -1,12 +1,16 @@
 // used for multiple exporte functionality
-function moduleFunc() {
+export function moduleFunc() {
     log("from inside module");
     return 42;
 }
 
-async function moduleAsyncFunc() {
-    log("from inside async module");
-    return 73;
-}
+export async function moduleAsyncFunc() {
+    log("from inside async module 1");
+    return new Promise(function (resolve, reject) {
+        log("from inside async module 2");
+        resolve(73);
+    });
 
-return  { moduleFunc: moduleFunc, moduleAsyncFunc: moduleAsyncFunc };
+    //log("from inside async module");
+    //return 73;
+}

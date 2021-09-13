@@ -1,21 +1,6 @@
-// this module is the entry point from the native code 
-//serveRequest is called function to initialize the serving
-// handler is the default function named after the module with parameters (HttpRequest, HttpResponse)
-export default function serveRequest(socket, method, uri, handler) {
-    if (typeof handler === 'function') {
-        const request = new HttpRequest(socket, method, uri);
-        const response = new HttpResponse(socket);
-        handler(request, response);
-    } else {
-        const result = "serveRequest: handler is not a function";
-        const len = result.length();
-        coreSocketWrite(socket, "HTTP/1.1 200 OK\r\n");
-        coreSocketWrite(socket, "content-type: text/html\r\n");
-        coreSocketWrite(socket, "content-length: " + len + "\r\n\r\n");
-        coreSocketWrite(socket, result);
-        coreSocketClose(socket);
-    }
-}
+// HTTP Request and Responce classes for reading and writing to requests
+export const CONTENT_LENGTH = "content-length";
+export const CONTENT_TYPE = "content-type";
 
 export class HttpRequest {
     constructor(socket, method, uri) {
@@ -31,19 +16,18 @@ export class HttpRequest {
     }
 }
 
-const CONTENT_LENGTH = "content-length";
-
 export class HttpResponse {
 
     constructor(socket) {
         this.context = Object.freeze({ socket });
-        header = {};
-        statusCode = 200;
-        contentType = 'application/json';
+        this.header = {};
+        this.statusCode = 200;
+        this.contentType = 'application/json';
     }
 
     setContentType(contentType) {
         this.contentType = contentType;
+        return this;
     }
 
     getContentType() {
@@ -51,38 +35,44 @@ export class HttpResponse {
     }
     setStatus(statusCode) {
         this.statusCode = statusCode;
+        return this;
     }
 
     setHeader(key, value) {
         key = key.toLowerCase();
-        const oldValue = header[key];
-        header[key] = (oldValue) ? (oldValue + "; " + value) : value;
+        const oldValue = this.header[key];
+        this.header[key] = (oldValue) ? (oldValue + "; " + value) : value;
+        return this;
     }
 
     getHeader(key) {
         key = key.toLowerCase();
-        return header[key];
+        return this.header[key];
     }
 
     sendHeader() {
-        for (key in header) {
-            coreSocketWrite(context.socket, key + ": " + header[key] + "\r\n");
+        for (const key in this.header) {
+            core.coreSocketWrite(this.context.socket, key + ": " + this.header[key] + "\r\n");
         }
         // separator
-        coreSocketWrite(context.socket, "\r\n");
+        core.coreSocketWrite(this.context.socket, "\r\n");
+        return this;
     }
 
     send(buffer) {
         // http protocol
         const http = "HTTP/1.1 " + this.statusCode + " " + ((this.statusCode == 200) ? "OK" : "ERROR") + "\r\n";
-        coreSocketWrite(context.socket, http);
+        core.coreSocketWrite(this.context.socket, http);
         //http header
-        if (!header[CONTENT_LENGTH]) {
-            header[CONTENT_LENGTH] = coreGetBytesLength(buffer);
+        if (this.contentType) {
+            this.header[CONTENT_TYPE] = this.contentType;
+        }
+        if (!this.header[CONTENT_LENGTH]) {
+            this.header[CONTENT_LENGTH] = core.coreGetBytesLength(buffer);
         }
         this.sendHeader();
         //send content
-        coreSocketWrite(context.socket, buffer);
-        coreSocketClose(context.socket);
+        core.coreSocketWrite(this.context.socket, buffer);
+        core.coreSocketClose(this.context.socket);
     }
 }

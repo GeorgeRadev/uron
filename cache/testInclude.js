@@ -1,7 +1,5 @@
 // used for import script test
-function handler() {
+export function incFunc() {
     log("from inside include");
     return 42;
 }
-
-return handler;
