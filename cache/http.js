@@ -3,8 +3,8 @@ export const CONTENT_LENGTH = "content-length";
 export const CONTENT_TYPE = "content-type";
 
 export class HttpRequest {
-    constructor(socket, method, uri) {
-        this.context = Object.freeze({ socket, method, uri });
+    constructor(method, uri) {
+        this.context = Object.freeze({method, uri });
     }
 
     getMethod() {
@@ -18,8 +18,7 @@ export class HttpRequest {
 
 export class HttpResponse {
 
-    constructor(socket) {
-        this.context = Object.freeze({ socket });
+    constructor() {
         this.header = {};
         this.statusCode = 200;
         this.contentType = 'application/json';
@@ -52,27 +51,27 @@ export class HttpResponse {
 
     sendHeader() {
         for (const key in this.header) {
-            core.coreSocketWrite(this.context.socket, key + ": " + this.header[key] + "\r\n");
+            core.socketWrite(key + ": " + this.header[key] + "\r\n");
         }
         // separator
-        core.coreSocketWrite(this.context.socket, "\r\n");
+        core.socketWrite("\r\n");
         return this;
     }
 
     send(buffer) {
         // http protocol
         const http = "HTTP/1.1 " + this.statusCode + " " + ((this.statusCode == 200) ? "OK" : "ERROR") + "\r\n";
-        core.coreSocketWrite(this.context.socket, http);
+        core.socketWrite(http);
         //http header
         if (this.contentType) {
             this.header[CONTENT_TYPE] = this.contentType;
         }
         if (!this.header[CONTENT_LENGTH]) {
-            this.header[CONTENT_LENGTH] = core.coreGetBytesLength(buffer);
+            this.header[CONTENT_LENGTH] = core.getBytesLength(buffer);
         }
         this.sendHeader();
         //send content
-        core.coreSocketWrite(this.context.socket, buffer);
-        core.coreSocketClose(this.context.socket);
+        core.socketWrite(buffer);
+        core.socketClose();
     }
 }

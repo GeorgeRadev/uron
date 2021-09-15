@@ -16,6 +16,7 @@
 #include "V8Functions.hpp"
 
 #define PUMP_LIMIT 5
+#define GLOBAL_JS "__global__.js"
 
 // https://gist.github.com/surusek/4c05e4dcac6b82d18a1a28e6742fc23e
 
@@ -48,8 +49,6 @@ class V8Thread {
     static V8Thread *getByIsolate(void *isolate) { return V8Thread::isolateToThread[isolate]; }
 
     util::ResourceManager *resourceManager;
-    v8::Global<v8::Value> lastResult;
-    v8::Platform *platform;
 
     const char *arg;
     bool exit;
@@ -57,6 +56,7 @@ class V8Thread {
     util::ArrayBlockingQueue<V8Task> eventLoopQueue;
 
     void eventLoopThreadHandler() {
+        exit = true;
         // Creating platform
         std::unique_ptr<v8::Platform> platform = v8::platform::NewDefaultPlatform(2, v8::platform::IdleTaskSupport::kEnabled);
         // Initializing V8 VM
@@ -69,7 +69,6 @@ class V8Thread {
         // add to map
         isolateToThread[(void *)isolate] = this;
 
-        this->platform = platform.get();
         {
             v8::Isolate::Scope isolate_scope(isolate);
             // any Local should has this one first
@@ -79,26 +78,24 @@ class V8Thread {
             // Binding dynamic import() callbacks
             isolate->SetHostImportModuleDynamicallyCallback(callDynamic);
             isolate->SetPromiseRejectCallback(PromiseRejectCallback);
-            isolate->SetPromiseHook(PromiseHook);
             isolate->SetMicrotasksPolicy(v8::MicrotasksPolicy::kExplicit);
 
             v8::Local<v8::ObjectTemplate> global_ = v8::ObjectTemplate::New(isolate);
+            global_->Set(isolate, "include", v8::FunctionTemplate::New(isolate, include));
             {
                 // Binding functions
                 v8::Local<v8::ObjectTemplate> core = v8::ObjectTemplate::New(isolate);
 
                 core->Set(isolate, "logSTDOUT", v8::FunctionTemplate::New(isolate, logSTDOUT));
                 core->Set(isolate, "logSTDERR", v8::FunctionTemplate::New(isolate, logSTDERR));
-                core->Set(isolate, "coreInclude", v8::FunctionTemplate::New(isolate, include));
 
-                core->Set(isolate, "coreSetResult", v8::FunctionTemplate::New(isolate, setResult));
-                core->Set(isolate, "coreSocketWrite", v8::FunctionTemplate::New(isolate, socketWrite));
-                core->Set(isolate, "coreSocketClose", v8::FunctionTemplate::New(isolate, socketClose));
-                core->Set(isolate, "coreGetBytesLength", v8::FunctionTemplate::New(isolate, getBytesLength));
-                core->Set(isolate, "coreGetRequest", v8::FunctionTemplate::New(isolate, getRequest));
+                core->Set(isolate, "socketWrite", v8::FunctionTemplate::New(isolate, socketWrite));
+                core->Set(isolate, "socketClose", v8::FunctionTemplate::New(isolate, socketClose));
+                core->Set(isolate, "getBytesLength", v8::FunctionTemplate::New(isolate, getBytesLength));
 
                 global_->Set(v8::String::NewFromUtf8Literal(isolate, "core", v8::NewStringType::kNormal), core);
             }
+
             // Creating context
             v8::Local<v8::Context> context_ = v8::Context::New(isolate, NULL, global_);
             v8::Context::Scope context_scope(context_);
@@ -109,15 +106,11 @@ class V8Thread {
             v8::Local<v8::Object> coreInstance = v8::Local<v8::Object>::Cast(obj);
             coreInstance->Set(context_, v8::String::NewFromUtf8Literal(isolate, "global", v8::NewStringType::kNormal), globalInstance).Check();
 
-            {
-                // Enter this processor's context so all the remaining operations be executed in it
-                v8::Local<v8::Context> context = v8::Local<v8::Context>::New(isolate, context_);
-                v8::Context::Scope context_scope(context);
-                v8::Local<v8::Object> global = context->Global();
-                v8::TryCatch try_catch(isolate);
+            v8::Local<v8::Function> requestFunction_;
 
-                // call request handling loop
-                std::string name("__event_loop__.js");
+            { // compile and load global js
+                v8::TryCatch try_catch(isolate);
+                std::string name(GLOBAL_JS);
                 std::string source;
                 resourceManager->asString(name, source);
                 v8::Local<v8::String> nameLocal = v8::String::NewFromUtf8(isolate, name.c_str()).ToLocalChecked();
@@ -134,15 +127,74 @@ class V8Thread {
                                         v8::False(isolate)            // is ES6 module
                 );
 
-                auto compileResult = v8::Script::Compile(context, sourceLocal, &origin);
+                auto compileResult = v8::Script::Compile(context_, sourceLocal, &origin);
                 v8::Local<v8::Script> script;
                 if (compileResult.ToLocal(&script)) {
                     v8::Local<v8::Value> result;
-                    auto runResult = script->Run(context);
+                    auto runResult = script->Run(context_);
+                    if (runResult.ToLocal(&result)) {
+                        if (result->IsFunction()) {
+                            requestFunction_ = result.As<v8::Function>();
+                            exit = false;
+                        } else {
+                            fputs("global result is not a function", stderr);
+                        }
+                    } else {
+                        fputs("global result is not defined", stderr);
+                    }
+                } else {
+                    // there should be exception
                 }
+
                 ReportException(isolate, try_catch);
             }
+
+            while (!exit) {
+                // pump message loop and resolve promises
+                for (int count = 0; v8::platform::PumpMessageLoop(platform.get(), isolate) && count < PUMP_LIMIT; count++) {
+                    continue;
+                }
+                isolate->PerformMicrotaskCheckpoint();
+
+                V8Task *task = eventLoopQueue.dequeue_for(std::chrono::milliseconds(1000));
+                if (task) {
+                    try {
+                        // Enter this processor's context so all the remaining operations be executed in it
+                        v8::Local<v8::Context> context = v8::Local<v8::Context>::New(isolate, context_);
+                        v8::Context::Scope context_scope(context);
+                        v8::Local<v8::Object> global = context->Global();
+                        v8::TryCatch try_catch(isolate);
+                        v8::Local<v8::Object> requestObject = v8::Object::New(isolate);
+
+                        auto t = global->Set(context, v8::String::NewFromUtf8(isolate, SOCKET_VAR_NAME, v8::NewStringType::kNormal).ToLocalChecked(), v8::Int32::New(isolate, task->socket));
+                        t = requestObject->Set(context, v8::String::NewFromUtf8(isolate, "socket", v8::NewStringType::kNormal).ToLocalChecked(), v8::Int32::New(isolate, task->socket));
+                        t = requestObject->Set(context, v8::String::NewFromUtf8(isolate, "method", v8::NewStringType::kNormal).ToLocalChecked(), v8::String::NewFromUtf8(isolate, task->method.c_str(), v8::NewStringType::kNormal).ToLocalChecked());
+                        t = requestObject->Set(context, v8::String::NewFromUtf8(isolate, "uri", v8::NewStringType::kNormal).ToLocalChecked(), v8::String::NewFromUtf8(isolate, task->uri.c_str(), v8::NewStringType::kNormal).ToLocalChecked());
+
+                        const int argc = 1;
+                        v8::Local<v8::Value> argv[argc] = {requestObject};
+                        v8::Local<v8::Function> requestFunction = v8::Local<v8::Function>::New(isolate, requestFunction_);
+                        v8::MaybeLocal<v8::Value> callResult = requestFunction->Call(context, context->Global(), argc, argv);
+
+                        // log classical try cach error
+                        // async ones are served by PromiseRejectCallback
+                        if (try_catch.HasCaught()) {
+                            v8::String::Utf8Value exception(isolate, try_catch.Exception());
+                            v8::Local<v8::Message> message = try_catch.Message();
+                            std::string exeptionText = getExceptionString(isolate, exception, message);
+                            fputs(exeptionText.c_str(), stderr);
+                            serveError(task->socket, exeptionText);
+                        }
+
+                    } catch (...) {
+                        // nothing to do here
+                        fprintf(stderr, "V8Thread Exception\n");
+                    }
+                    delete task;
+                }
+            }
         }
+
         // clean up
         isolateToThread.erase((void *)isolate);
 
@@ -166,23 +218,6 @@ class V8Thread {
     void enqueueTask(V8Task *task) { eventLoopQueue.enqueue(task); }
 
   private:
-    static void PromiseHook(v8::PromiseHookType type, v8::Local<v8::Promise> promise, v8::Local<v8::Value> parent) {
-        switch (type) {
-        case v8::PromiseHookType::kInit:
-            fputs("--init\n", stderr);
-            break;
-        case v8::PromiseHookType::kBefore:
-            fputs("--before\n", stderr);
-            break;
-        case v8::PromiseHookType::kResolve:
-            fputs("--resolve\n", stderr);
-            break;
-        case v8::PromiseHookType::kAfter:
-            fputs("--after\n", stderr);
-            break;
-        }
-    }
-
     static void include(const v8::FunctionCallbackInfo<v8::Value> &args) {
         if (args.Length() < 1) {
             return;
@@ -250,22 +285,6 @@ class V8Thread {
             }
         }
 
-        /*
-                // compile function close
-                v8::ScriptCompiler::Source basescript(source, origin);
-                auto maybeFunctionScript = v8::ScriptCompiler::CompileFunctionInContext(context, &basescript, 0, nullptr, 0, nullptr, v8::ScriptCompiler::kEagerCompile);
-
-                if (!try_catch.HasCaught()) {
-                    // run the function closure
-                    auto function = maybeFunctionScript.ToLocalChecked();
-                    v8::MaybeLocal<v8::Value> callResult = function->Call(context, global, 0, nullptr);
-                    v8::Local<v8::Value> result;
-                    if (callResult.ToLocal(&result)) {
-                        args.GetReturnValue().Set(result);
-                        return;
-                    }
-                }
-        */
         if (try_catch.HasCaught()) {
             // Reject current scope
             // interestingly try_catch cannot be retrown
@@ -275,112 +294,6 @@ class V8Thread {
         }
     }
 
-    static void getRequest(const v8::FunctionCallbackInfo<v8::Value> &args) {
-        auto isolate = args.GetIsolate();
-        v8::HandleScope scope(isolate);
-        V8Thread *thread = getByIsolate(isolate);
-
-        for (int count = 0; v8::platform::PumpMessageLoop(thread->platform, isolate) && count < PUMP_LIMIT; count++) {
-            continue;
-        }
-        isolate->PerformMicrotaskCheckpoint();
-
-        auto context = isolate->GetCurrentContext();
-        if (thread) {
-            V8Task *task = thread->eventLoopQueue.dequeue_for(std::chrono::milliseconds(1000));
-            if (task) {
-                try {
-                    v8::Local<v8::Object> requestObject = v8::Object::New(isolate);
-                    auto t = requestObject->Set(context, v8::String::NewFromUtf8(isolate, "method", v8::NewStringType::kNormal).ToLocalChecked(), v8::String::NewFromUtf8(isolate, task->method.c_str(), v8::NewStringType::kNormal).ToLocalChecked());
-                    t = requestObject->Set(context, v8::String::NewFromUtf8(isolate, "uri", v8::NewStringType::kNormal).ToLocalChecked(), v8::String::NewFromUtf8(isolate, task->uri.c_str(), v8::NewStringType::kNormal).ToLocalChecked());
-                    t = requestObject->Set(context, v8::String::NewFromUtf8(isolate, "socket", v8::NewStringType::kNormal).ToLocalChecked(), v8::Int32::New(isolate, task->socket));
-
-                    args.GetReturnValue().Set(requestObject);
-                    return;
-
-                } catch (const std::exception &e) {
-                    fprintf(stderr, "V8Thread Error: %s\n", e.what());
-                } catch (...) {
-                    // nothing to do here
-                    fprintf(stderr, "V8Thread Exception\n");
-                }
-                delete task;
-            }
-        }
-        // return undefined on no requests
-        args.GetReturnValue().Set(v8::Undefined(isolate));
-    }
-
-    static void setResult(const v8::FunctionCallbackInfo<v8::Value> &args) {
-        auto isolate = args.GetIsolate();
-        v8::HandleScope scope(isolate);
-
-        auto thread = getByIsolate(isolate);
-        if (args.Length() > 0) {
-            thread->lastResult.Reset(isolate, args[0]);
-        } else {
-            thread->lastResult.Reset(isolate, v8::Undefined(isolate));
-        }
-    }
-
-    static void socketWrite(const v8::FunctionCallbackInfo<v8::Value> &args) {
-        auto isolate = args.GetIsolate();
-        v8::HandleScope scope(isolate);
-
-        if (args.Length() < 2 || !args[0]->IsNumber()) {
-            isolate->ThrowException(v8::String::NewFromUtf8(isolate, "Expecting 2 parameters: socketNumber and arrayBuffer").ToLocalChecked());
-            return;
-        }
-        v8::Local<v8::Number> socketRef = args[0].As<v8::Number>();
-        const int socket = socketRef->IntegerValue(isolate->GetCurrentContext()).ToChecked();
-
-        // as string value
-        v8::String::Utf8Value value(args.GetIsolate(), args[1]);
-        const char *strValue = *value;
-        if (*value == NULL) {
-            args.GetIsolate()->ThrowError("Error getting value");
-            return;
-        }
-        if (socket > 0) {
-            write(socket, strValue, strlen(strValue));
-        }
-    }
-
-    static void socketClose(const v8::FunctionCallbackInfo<v8::Value> &args) {
-        auto isolate = args.GetIsolate();
-        v8::HandleScope scope(isolate);
-
-        if (args.Length() < 1 || !args[0]->IsNumber()) {
-            isolate->ThrowException(v8::String::NewFromUtf8(isolate, "Expecting 1 parameters: socketNumber ").ToLocalChecked());
-            return;
-        }
-        int socket = args[0]->Int32Value(isolate->GetCurrentContext()).ToChecked();
-        if (socket > 0) {
-            close(socket);
-            args.GetReturnValue().Set(errno);
-        } else {
-            args.GetReturnValue().Set(-1);
-        }
-    }
-
-    static void getBytesLength(const v8::FunctionCallbackInfo<v8::Value> &args) {
-        auto isolate = args.GetIsolate();
-        v8::HandleScope scope(isolate);
-
-        uint32_t len = 0;
-        if (args.Length() == 1) {
-            v8::String::Utf8Value file(args.GetIsolate(), args[0]);
-            if (*file == NULL) {
-                args.GetIsolate()->ThrowError("Error loading file");
-                return;
-            }
-            v8::String::Utf8Value str(isolate, args[0]);
-            len = strnlen(*str, 2 * str.length());
-            args.GetReturnValue().Set(len);
-        } else {
-            args.GetReturnValue().Set(-1);
-        }
-    }
 
     static std::string getExceptionString(v8::Isolate *isolate, v8::String::Utf8Value &exception, v8::Local<v8::Message> &message) {
         std::string exceptionString;
@@ -571,27 +484,35 @@ class V8Thread {
         v8::Local<v8::Value> exception = data.GetValue();
         v8::Local<v8::Message> message;
         // Assume that all objects are stack-traces.
+
+        int socket = -1;
+        {
+            v8::Local<v8::Context> context = isolate->GetCurrentContext();
+            auto global = context->Global();
+            auto socketMayValue = global->Get(context, v8::String::NewFromUtf8(isolate, SOCKET_VAR_NAME, v8::NewStringType::kNormal).ToLocalChecked());
+            v8::Local<v8::Value> socketValue;
+            if (socketMayValue.ToLocal(&socketValue)) {
+                if (socketValue->IsNumber()) {
+                    socket = socketValue->Int32Value(isolate->GetCurrentContext()).ToChecked();
+                }
+            }
+        }
         if (exception->IsObject()) {
             v8::String::Utf8Value exceptionStr(isolate, exception);
             message = v8::Exception::CreateMessage(isolate, exception);
             std::string error = getExceptionString(isolate, exceptionStr, message);
             fputs(error.c_str(), stderr);
+            // response as error
+            if (socket > 0) {
+                serveError(socket, error);
+            }
         } else {
             v8::String::Utf8Value exceptionStr(isolate, exception);
             fputs(*exceptionStr, stderr);
-        }
-
-        v8::Local<v8::Context> context = isolate->GetCurrentContext();
-        v8::TryCatch try_catch(isolate);
-        v8::Local<v8::Object> globalInstance = context->Global();
-        v8::Local<v8::Value> func = globalInstance->Get(context, v8::String::NewFromUtf8Literal(isolate, "onUnhandledRejection", v8::NewStringType::kNormal)).ToLocalChecked();
-        if (func->IsFunction()) {
-            v8::Local<v8::Function> onUnhandledRejection = v8::Local<v8::Function>::Cast(func);
-            v8::Local<v8::Value> argv[1] = {exception};
-            v8::MaybeLocal<v8::Value> result = onUnhandledRejection->Call(context, globalInstance, 1, argv);
-            ReportException(isolate, try_catch);
-        } else {
-            fputs("onUnhandledRejection not found in the current context\n", stderr);
+            // response as error
+            if (socket > 0) {
+                serveError(socket, *exceptionStr);
+            }
         }
     }
 };

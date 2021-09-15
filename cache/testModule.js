@@ -5,12 +5,15 @@ export function moduleFunc() {
 }
 
 export async function moduleAsyncFunc() {
-    log("from inside async module 1");
-    return new Promise(function (resolve, reject) {
-        log("from inside async module 2");
-        resolve(73);
-    });
+    log("from inside async module");
+    return 73;
+}
 
-    //log("from inside async module");
-    //return 73;
+export function modulePromiseFunc() {
+    log("from inside promise module 1");
+    return new Promise(function (resolve, reject) {
+        log("from inside promise module 2");
+        resolve(73);
+        log("from inside promise module 3");
+    });
 }

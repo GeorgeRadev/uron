@@ -5,6 +5,8 @@
 #include <libplatform/libplatform.h>
 #include <v8.h>
 
+#define SOCKET_VAR_NAME "_this_is_the_socket_variable_in_the_execution_context"
+
 static std::size_t extra_space(const char *str) noexcept {
     std::size_t result = 0;
     for (int i = 0; str[i]; ++i) {
@@ -67,7 +69,6 @@ static void escape_string(std::string &outstr, const char *str) noexcept {
             escape[1] = 'f';
             outstr += escape;
             break;
-
         // newline (0x0a)
         case '\n':
             escape[1] = 'n';
@@ -98,7 +99,30 @@ static void escape_string(std::string &outstr, const char *str) noexcept {
     }
 }
 
-static const char *ToCString(const v8::String::Utf8Value &value) { return *value ? *value : "<string conversion failed>"; }
+static void serveError(int socket, const char *error) {
+    const int len = strlen(error);
+    const char *str;
+    char buff[10];
+    sprintf(buff, "%d", len);
+
+    str = "HTTP/1.1 500 ERROR\r\n";
+    write(socket, str, strlen(str));
+    str = "content-type: text/plain\r\n";
+    write(socket, str, strlen(str));
+    str = "content-length: ";
+    write(socket, str, strlen(str));
+    str = buff;
+    write(socket, str, strlen(str));
+    str = "\r\n\r\n";
+    write(socket, str, strlen(str));
+    write(socket, error, len);
+    close(socket);
+}
+
+static void serveError(int socket, std::string &errorText) {
+    const char *error = errorText.c_str();
+    serveError(socket, error);
+}
 
 static void logSTDOUT(const v8::FunctionCallbackInfo<v8::Value> &args) {
     if (args.Length() < 1) {
@@ -129,5 +153,84 @@ static void logSTDERR(const v8::FunctionCallbackInfo<v8::Value> &args) {
         v8::String::Utf8Value value(isolate, arg);
         fputs(*value, stderr);
         fputs("\r\n", stderr);
+    }
+}
+
+static void getBytesLength(const v8::FunctionCallbackInfo<v8::Value> &args) {
+    const auto isolate = args.GetIsolate();
+    v8::HandleScope scope(isolate);
+
+    uint32_t len = 0;
+    if (args.Length() == 1) {
+        v8::String::Utf8Value value(isolate, args[0]);
+        if (*value == NULL) {
+            args.GetIsolate()->ThrowError("Cannot convert to char*");
+            return;
+        }
+        v8::String::Utf8Value str(isolate, args[0]);
+        len = strnlen(*str, 2 * str.length());
+        args.GetReturnValue().Set(len);
+    } else {
+        args.GetReturnValue().Set(-1);
+    }
+}
+
+static void socketWrite(const v8::FunctionCallbackInfo<v8::Value> &args) {
+    const auto isolate = args.GetIsolate();
+    v8::HandleScope scope(isolate);
+
+    int socket = -1;
+    {
+        v8::Local<v8::Context> context = isolate->GetCurrentContext();
+        auto global = context->Global();
+        auto socketMayValue = global->Get(context, v8::String::NewFromUtf8(isolate, SOCKET_VAR_NAME, v8::NewStringType::kNormal).ToLocalChecked());
+        v8::Local<v8::Value> socketValue;
+        if (socketMayValue.ToLocal(&socketValue)) {
+            if (socketValue->IsNumber()) {
+                socket = socketValue->Int32Value(context).ToChecked();
+            }
+        }
+    }
+
+    if (socket > 3) {
+        const int l = args.Length();
+        for (int i = 0; i < l; ++i) {
+            v8::Local<v8::Value> arg = args[i];
+            v8::String::Utf8Value value(isolate, arg);
+            const char *strValue = *value;
+            if (strValue == NULL) {
+                isolate->ThrowException(v8::String::NewFromUtf8(isolate, "Cannot convert parameter to char*").ToLocalChecked());
+                return;
+            }
+            write(socket, strValue, strlen(strValue));
+        }
+    } else {
+        fputs("no socket in current context !!!", stderr);
+    }
+}
+
+static void socketClose(const v8::FunctionCallbackInfo<v8::Value> &args) {
+    const auto isolate = args.GetIsolate();
+    v8::HandleScope scope(isolate);
+
+    int socket = -1;
+    {
+        v8::Local<v8::Context> context = isolate->GetCurrentContext();
+        auto global = context->Global();
+        auto socketMayValue = global->Get(context, v8::String::NewFromUtf8(isolate, SOCKET_VAR_NAME, v8::NewStringType::kNormal).ToLocalChecked());
+        v8::Local<v8::Value> socketValue;
+        if (socketMayValue.ToLocal(&socketValue)) {
+            if (socketValue->IsNumber()) {
+                socket = socketValue->Int32Value(context).ToChecked();
+            }
+        }
+    }
+
+    if (socket > 3) {
+        close(socket);
+        args.GetReturnValue().Set(errno);
+    } else {
+        fputs("no socket in current context !!!", stderr);
+        args.GetReturnValue().Set(-1);
     }
 }

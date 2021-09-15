@@ -1,4 +1,4 @@
-import { moduleFunc, moduleAsyncFunc } from "testModule.js";
+import { moduleFunc, moduleAsyncFunc , modulePromiseFunc} from "testModule.js";
 
 const { incFunc } = include("testInclude.js");
 
@@ -7,6 +7,8 @@ async function verify() {
     moduleFunc();
     await moduleAsyncFunc();
     logError({ log: "after moduleAsyncFunc" });
+    await modulePromiseFunc();
+    logError({ log: "after modulePromiseFunc" });
 }
 
 export default async function requestHandler(request, response) {
