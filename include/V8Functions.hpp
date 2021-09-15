@@ -171,27 +171,27 @@ static void getBytesLength(const v8::FunctionCallbackInfo<v8::Value> &args) {
         len = strnlen(*str, 2 * str.length());
         args.GetReturnValue().Set(len);
     } else {
-        args.GetReturnValue().Set(-1);
+        args.GetReturnValue().Set(0);
+    }
+}
+
+static int getSocket(v8::Isolate *isolate) {
+    int socket = -1;
+    v8::Local<v8::Context> context = isolate->GetCurrentContext();
+    auto global = context->Global();
+    auto socketMayValue = global->Get(context, v8::String::NewFromUtf8(isolate, SOCKET_VAR_NAME, v8::NewStringType::kNormal).ToLocalChecked());
+    v8::Local<v8::Value> socketValue;
+    if (socketMayValue.ToLocal(&socketValue)) {
+        if (socketValue->IsNumber()) {
+            socket = socketValue->Int32Value(isolate->GetCurrentContext()).ToChecked();
+        }
     }
 }
 
 static void socketWrite(const v8::FunctionCallbackInfo<v8::Value> &args) {
     const auto isolate = args.GetIsolate();
     v8::HandleScope scope(isolate);
-
-    int socket = -1;
-    {
-        v8::Local<v8::Context> context = isolate->GetCurrentContext();
-        auto global = context->Global();
-        auto socketMayValue = global->Get(context, v8::String::NewFromUtf8(isolate, SOCKET_VAR_NAME, v8::NewStringType::kNormal).ToLocalChecked());
-        v8::Local<v8::Value> socketValue;
-        if (socketMayValue.ToLocal(&socketValue)) {
-            if (socketValue->IsNumber()) {
-                socket = socketValue->Int32Value(context).ToChecked();
-            }
-        }
-    }
-
+    const int socket = getSocket(isolate);
     if (socket > 3) {
         const int l = args.Length();
         for (int i = 0; i < l; ++i) {
@@ -212,20 +212,7 @@ static void socketWrite(const v8::FunctionCallbackInfo<v8::Value> &args) {
 static void socketClose(const v8::FunctionCallbackInfo<v8::Value> &args) {
     const auto isolate = args.GetIsolate();
     v8::HandleScope scope(isolate);
-
-    int socket = -1;
-    {
-        v8::Local<v8::Context> context = isolate->GetCurrentContext();
-        auto global = context->Global();
-        auto socketMayValue = global->Get(context, v8::String::NewFromUtf8(isolate, SOCKET_VAR_NAME, v8::NewStringType::kNormal).ToLocalChecked());
-        v8::Local<v8::Value> socketValue;
-        if (socketMayValue.ToLocal(&socketValue)) {
-            if (socketValue->IsNumber()) {
-                socket = socketValue->Int32Value(context).ToChecked();
-            }
-        }
-    }
-
+    const int socket = getSocket(isolate);
     if (socket > 3) {
         close(socket);
         args.GetReturnValue().Set(errno);

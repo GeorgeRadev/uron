@@ -13,10 +13,19 @@
 
 #include "ArrayBlockingQueue.hpp"
 #include "ResourceManager.hpp"
-#include "V8Functions.hpp"
 
 #define PUMP_LIMIT 5
 #define GLOBAL_JS "__global__.js"
+
+#define DEBUG_MODE
+
+#ifdef DEBUG_MODE
+#define DEBUG(args...) fprintf(stderr, args);
+#else
+#define DEBUG(x)
+#endif
+
+#include "V8Functions.hpp"
 
 // https://gist.github.com/surusek/4c05e4dcac6b82d18a1a28e6742fc23e
 
@@ -242,7 +251,7 @@ class V8Thread {
             v8::String::Utf8Value resource(isolate, arg);
             std::string resourceName(*resource);
             std::string resourceSource;
-            fprintf(stderr, "include: %s\n", resourceName.c_str());
+            DEBUG("include: %s\n", resourceName.c_str());
 
             V8Thread *thread = getByIsolate(isolate);
             thread->resourceManager->asString(resourceName, resourceSource);
@@ -293,7 +302,6 @@ class V8Thread {
             return;
         }
     }
-
 
     static std::string getExceptionString(v8::Isolate *isolate, v8::String::Utf8Value &exception, v8::Local<v8::Message> &message) {
         std::string exceptionString;
@@ -378,7 +386,7 @@ class V8Thread {
     static v8::MaybeLocal<v8::Module> loadModule(v8::Local<v8::Context> context, const char *name, const char *code) {
         // Convert char[] to VM's string type
         auto isolate = context->GetIsolate();
-        fprintf(stderr, "import: %s\n", name);
+        DEBUG("import: %s\n", name);
 
         v8::Local<v8::String> vcode = v8::String::NewFromUtf8(isolate, code).ToLocalChecked();
         // Create script origin to determine if it is module or not.
@@ -408,7 +416,7 @@ class V8Thread {
         auto isolate = context->GetIsolate();
         v8::Local<v8::Module> mod;
         if (!maybeModule.ToLocal(&mod)) {
-            printf("Error loading module!\n");
+            fprintf(stderr, "Error loading module!\n");
             return false;
         }
         v8::Maybe<bool> result = mod->InstantiateModule(context, callResolve);
@@ -472,31 +480,26 @@ class V8Thread {
     }
 
     static void PromiseRejectCallback(v8::PromiseRejectMessage data) {
-        if (data.GetEvent() == v8::kPromiseRejectAfterResolved || data.GetEvent() == v8::kPromiseResolveAfterResolved) {
-            // Ignore reject/resolve after resolved.
-            return;
+        { // check for  unhandled rejection
+            const auto event = data.GetEvent();
+            if (event != v8::kPromiseRejectWithNoHandler) {
+                // event == v8::kPromiseRejectAfterResolved
+                // event == v8::kPromiseResolveAfterResolved
+                // Ignore reject/resolve after resolved.
+
+                // event == v8::kPromiseResolveAfterResolved
+                // already rejected
+                return;
+            }
         }
+
         v8::Local<v8::Promise> promise = data.GetPromise();
         v8::Isolate *isolate = promise->GetIsolate();
-        if (data.GetEvent() == v8::kPromiseHandlerAddedAfterReject) {
-            return;
-        }
         v8::Local<v8::Value> exception = data.GetValue();
         v8::Local<v8::Message> message;
         // Assume that all objects are stack-traces.
 
-        int socket = -1;
-        {
-            v8::Local<v8::Context> context = isolate->GetCurrentContext();
-            auto global = context->Global();
-            auto socketMayValue = global->Get(context, v8::String::NewFromUtf8(isolate, SOCKET_VAR_NAME, v8::NewStringType::kNormal).ToLocalChecked());
-            v8::Local<v8::Value> socketValue;
-            if (socketMayValue.ToLocal(&socketValue)) {
-                if (socketValue->IsNumber()) {
-                    socket = socketValue->Int32Value(isolate->GetCurrentContext()).ToChecked();
-                }
-            }
-        }
+        const int socket = getSocket(isolate);
         if (exception->IsObject()) {
             v8::String::Utf8Value exceptionStr(isolate, exception);
             message = v8::Exception::CreateMessage(isolate, exception);

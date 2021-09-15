@@ -22,7 +22,6 @@ function responseError501(result) {
 }
 async function execute(request, urijs) {
     const handler = include(urijs);
-    logError({ log: "serveRequest: handler in [" + urijs + "] type [" + (typeof handler) + "] is not a function.", result: handler });
     var error = "";
 
     if (typeof handler === 'object') {
@@ -34,10 +33,10 @@ async function execute(request, urijs) {
                 await handlerDefault(httpRequest, httpResponse);
                 return;
             } else {
-                error = "handlerFunction type: " + (typeof handlerDefault);
+                error = "expecting async function but found type: " + (typeof handlerDefault);
             }
         } else {
-            error = "no handlerFunction found";
+            error = "no defaut async function found";
         }
     }
 

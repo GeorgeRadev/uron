@@ -12,8 +12,8 @@ async function verify() {
 }
 
 export default async function requestHandler(request, response) {
-    await verify();
     logError({ log: "From test: ", method: request.getMethod(), uri: request.getURI() });
+    await verify();
     response.setStatus(200);
     response.setContentType("text/html");
     response.send("OK");
