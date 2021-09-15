@@ -50,12 +50,13 @@ void connection_handler(util::HTTPRequest *request, void *_context) {
             return;
         }
 
-        // serve file
-        char header[1024];
-        sprintf(header, "HTTP/1.1 200 OK\r\nContent-type: %s\r\nContent-Length: %ld\r\n\r\n", contentType, size);
-        write(socket, header, strlen(header));
-        context->resourceManager->writeToSocket(request->uri, socket);
-        close(socket);
+        { // serve file
+            char header[1024];
+            sprintf(header, "HTTP/1.1 200 OK\r\nContent-type: %s\r\nContent-Length: %ld\r\n\r\n", contentType, size);
+            write(socket, header, strlen(header));
+            context->resourceManager->writeToSocket(request->uri, socket);
+            close(socket);
+        }
     }
 }
 

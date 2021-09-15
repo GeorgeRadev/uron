@@ -4,7 +4,7 @@ export const CONTENT_TYPE = "content-type";
 
 export class HttpRequest {
     constructor(method, uri) {
-        this.context = Object.freeze({method, uri });
+        this.context = Object.freeze({ method, uri });
     }
 
     getMethod() {
@@ -72,6 +72,5 @@ export class HttpResponse {
         this.sendHeader();
         //send content
         core.socketWrite(buffer);
-        core.socketClose();
     }
 }
