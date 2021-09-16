@@ -1,14 +1,23 @@
 diff --git a/src/d8/d8.cc b/src/d8/d8.cc
-index e2892a4e82..a0bd39fb95 100644
+index 6d35be77b8..8ff8ec3666 100644
 --- a/src/d8/d8.cc
 +++ b/src/d8/d8.cc
-@@ -5283,6 +5283,22 @@ int Shell::Main(int argc, char* argv[]) {
+@@ -5318,6 +5318,31 @@ int Shell::Main(int argc, char* argv[]) {
  
  int main(int argc, char* argv[]) { return v8::Shell::Main(argc, argv); }
  
 +/*
++gclient sync
++git pull origin master
++
 +gm x64.release d8
 +gm x64.debug d8
++
++for monolith config : 
++gn args out.gn/x64.release.sample
++ninja -C out.gn/x64.release.sample v8_monolith
++gn args out.gn/x64.debug.sample
++ninja -C out.gn/x64.debug.sample v8_monolith
 +
 +(gdb)
 +set substitute-path ../../    /home/dead_one/Projects/C/v8/
@@ -26,10 +35,10 @@ index e2892a4e82..a0bd39fb95 100644
  #undef DCHECK
  #undef TRACE_BS
 diff --git a/src/parsing/parser-base.h b/src/parsing/parser-base.h
-index 108b11edc8..210494e83f 100644
+index ef2fb7ef3e..3b0a890cc8 100644
 --- a/src/parsing/parser-base.h
 +++ b/src/parsing/parser-base.h
-@@ -1165,6 +1165,7 @@ class ParserBase {
+@@ -1181,6 +1181,7 @@ class ParserBase {
                                             int seen_variables);
  
    ExpressionT ParseArrayLiteral();
@@ -37,16 +46,7 @@ index 108b11edc8..210494e83f 100644
  
    inline static bool IsAccessor(ParsePropertyKind kind) {
      return base::IsInRange(kind, ParsePropertyKind::kAccessorGetter,
-@@ -1630,7 +1631,7 @@ ParserBase<Impl>::FunctionState::~FunctionState() {
- 
- template <typename Impl>
- void ParserBase<Impl>::ReportUnexpectedToken(Token::Value token) {
--  return impl()->ReportUnexpectedTokenAt(scanner_->location(), token);
-+	impl()->ReportUnexpectedTokenAt(scanner_->location(), token);
- }
- 
- template <typename Impl>
-@@ -1892,6 +1893,9 @@ ParserBase<Impl>::ParsePrimaryExpression() {
+@@ -1965,6 +1966,9 @@ ParserBase<Impl>::ParsePrimaryExpression() {
      case Token::LBRACE:
        return ParseObjectLiteral();
  
@@ -56,10 +56,16 @@ index 108b11edc8..210494e83f 100644
      case Token::LPAREN: {
        Consume(Token::LPAREN);
        if (Check(Token::RPAREN)) {
-@@ -2762,6 +2766,76 @@ typename ParserBase<Impl>::ExpressionT ParserBase<Impl>::ParseObjectLiteral() {
+@@ -2825,6 +2829,83 @@ typename ParserBase<Impl>::ExpressionT ParserBase<Impl>::ParseObjectLiteral() {
                                    pos, has_rest_property, home_object));
  }
  
++inline static void addIndexedParameter(std::string &str, int paramIx){
++	char tmpstr[32];
++	snprintf(tmpstr, 32, "$%d ", paramIx);
++	str.append(tmpstr);
++}
++
 +template <typename Impl>
 +typename ParserBase<Impl>::ExpressionT ParserBase<Impl>::ParseSQLLiteral() {
 +	// SQLLiteral :: SQL EXPRESSION WITH :VAR ';'
@@ -76,6 +82,7 @@ index 108b11edc8..210494e83f 100644
 +	ExpressionListT sqlParametersArray(pointer_buffer());
 +
 +	Token::Value token = peek();
++	int paramIX = 1;
 +	do {
 +		// fprintf(stderr, "ParseSQLLiteral token: %s\n", Token::Name(token));
 +
@@ -86,7 +93,7 @@ index 108b11edc8..210494e83f 100644
 +			if (token == Token::STRING) {
 +				// we have string constant for escaping
 +				sqlParameters.push_back(factory()->NewStringLiteral(impl()->GetSymbol(), pos));
-+				sql.append("? ");
++				addIndexedParameter(sql, paramIX++);
 +			} else {
 +				// next one should be variable reference
 +				ExpressionT lhsExpression = ParseLeftHandSideExpression();
@@ -95,13 +102,13 @@ index 108b11edc8..210494e83f 100644
 +				}
 +				// if parsing is ok - use it as sql escaping
 +				sqlParameters.push_back(lhsExpression);
-+				sql.append("? ");
++				addIndexedParameter(sql, paramIX++);
 +			}
 +		} else if (token == Token::STRING) {
 +			// we have string constant for escaping
 +			Consume(token);
 +			sqlParameters.push_back(factory()->NewStringLiteral(impl()->GetSymbol(), pos));
-+			sql.append("? ");
++			addIndexedParameter(sql, paramIX++);
 +		} else {
 +			// add to the sql value
 +			Consume(token);
@@ -134,7 +141,7 @@ index 108b11edc8..210494e83f 100644
  void ParserBase<Impl>::ParseArguments(
      typename ParserBase<Impl>::ExpressionListT* args, bool* has_spread,
 diff --git a/src/parsing/preparser.h b/src/parsing/preparser.h
-index 1949e7f8a7..d455942324 100644
+index 746802a9aa..0455e8bd83 100644
 --- a/src/parsing/preparser.h
 +++ b/src/parsing/preparser.h
 @@ -527,6 +527,9 @@ class PreParserFactory {
@@ -169,7 +176,7 @@ index 0e191330c0..7ff525a13e 100644
          default:
            UNREACHABLE();
 diff --git a/src/parsing/scanner.h b/src/parsing/scanner.h
-index 3474f7270d..4b0d678021 100644
+index 7ab44d5b20..b9af8907c0 100644
 --- a/src/parsing/scanner.h
 +++ b/src/parsing/scanner.h
 @@ -438,13 +438,13 @@ class V8_EXPORT_PRIVATE Scanner {
