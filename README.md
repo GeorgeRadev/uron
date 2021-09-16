@@ -3,6 +3,32 @@
 small stateless v8 based microservice that uses postgres and redis as storage layer.
 development in progress.
 
+## V8 SQL patch
+
+V8 SQL patch is in the **v8_sql** folder.  
+It gives a nice sintaxis for entering postgres SQL expressions directly in the JavaScript with string and variable escaping to avoid SQL injections.  
+
+for example the following REST handler:
+
+```
+export default async function requestHandler(request, response) {
+    const username = "username"
+    const sql = SELECT user WHERE user = :username AND role = 'test';
+    
+    response.setStatus(200);
+    response.setContentType('text/plain');
+    response.send(JSON.stringify(sql));
+}
+```
+
+Tnen: **const sql = SELECT user WHERE user = 'test';**
+Will be equivalent to:
+
+```
+     sql = ["SELECT user WHERE user = $1 AND role = $2 ","username","test"]
+```
+
+
 ## build
 
 
