@@ -100,6 +100,7 @@ class V8Thread {
 
                 core->Set(isolate, "socketWrite", v8::FunctionTemplate::New(isolate, socketWrite));
                 core->Set(isolate, "socketClose", v8::FunctionTemplate::New(isolate, socketClose));
+                core->Set(isolate, "socketHeader", v8::FunctionTemplate::New(isolate, socketHeader));
                 core->Set(isolate, "getBytesLength", v8::FunctionTemplate::New(isolate, getBytesLength));
 
                 global_->Set(v8::String::NewFromUtf8Literal(isolate, "core", v8::NewStringType::kNormal), core);

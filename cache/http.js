@@ -4,15 +4,47 @@ export const CONTENT_TYPE = "content-type";
 
 export class HttpRequest {
     constructor(method, uri) {
-        this.context = Object.freeze({ method, uri });
+        this.method = method;
+        this.uri = uri;
     }
 
     getMethod() {
-        return this.context.method;
+        return this.method;
     }
 
     getURI() {
-        return this.context.uri;
+        return this.uri;
+    }
+
+    getQuery() {
+        if (!this.query) {
+            const query = this.uri.substring(this.uri.split('?')[0].length + 1);
+            const vars = query.split('&');
+            const queryObject = {};
+            for (var i = 0; i < vars.length; i++) {
+                const currentVar = vars[i];
+                const key = currentVar.split('=')[0];
+                const value = currentVar.substring(key.length + 1);
+                queryObject[key] = value;
+            }
+            this.query = queryObject;
+        }
+        return this.query;
+    }
+
+    getHeader() {
+        if (!this.header) {
+            const headerObject = {};
+            const headerLines = core.socketHeader().trim().split('\n');
+            for (var i = 0; i < headerLines.length; i++) {
+                const currentHeaderLine = headerLines[i];
+                const key = currentHeaderLine.split(':')[0];
+                const value = currentHeaderLine.substring(key.length + 1).trim();
+                headerObject[key] = value;
+            }
+            this.header = headerObject;
+        }
+        return this.header;
     }
 }
 

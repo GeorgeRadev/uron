@@ -33,22 +33,24 @@ class ResourceManager {
     // get mime type
     const char *getContentType(const std::string &resourceName) {
         const char *name = resourceName.c_str();
-        int dot = resourceName.find_last_of('.');
+        int len = strlen(name);
+        int params = resourceName.find_first_of('?');
+        int dot = resourceName.find_last_of('.', (params > 0) ? params : len);
         if (dot > 0) {
             const char *extention = resourceName.c_str() + dot + 1;
-            if (strcmp(extention, "html") == 0) {
+            if (strncmp(extention, "html", 4) == 0) {
                 return "text/html";
             }
-            if (strcmp(extention, "ico") == 0) {
+            if (strncmp(extention, "ico", 3) == 0) {
                 return "image/x-icon";
             }
-            if (strcmp(extention, "css") == 0) {
+            if (strncmp(extention, "css", 3) == 0) {
                 return "text/css";
             }
-            if (strcmp(extention, "svg") == 0) {
+            if (strncmp(extention, "svg", 3) == 0) {
                 return "image/svg+xml";
             }
-            if (strcmp(extention, "server") == 0) {
+            if (strncmp(extention, "server", 5) == 0) {
                 return EXECUTE;
             }
         }

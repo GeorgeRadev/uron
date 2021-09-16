@@ -3,6 +3,8 @@
 #define V8_COMPRESS_POINTERS
 #define V8_31BIT_SMIS_ON_64BIT_ARCH
 #include <libplatform/libplatform.h>
+#include <sstream>
+#include <string>
 #include <v8.h>
 
 #define SOCKET_VAR_NAME "_this_is_the_socket_variable_in_the_execution_context"
@@ -164,7 +166,7 @@ static void getBytesLength(const v8::FunctionCallbackInfo<v8::Value> &args) {
     if (args.Length() == 1) {
         v8::String::Utf8Value value(isolate, args[0]);
         if (*value == NULL) {
-            args.GetIsolate()->ThrowError("Cannot convert to char*");
+            isolate->ThrowError("Cannot convert to char*");
             return;
         }
         v8::String::Utf8Value str(isolate, args[0]);
@@ -186,6 +188,7 @@ static int getSocket(v8::Isolate *isolate) {
             socket = socketValue->Int32Value(isolate->GetCurrentContext()).ToChecked();
         }
     }
+    return socket;
 }
 
 static void socketWrite(const v8::FunctionCallbackInfo<v8::Value> &args) {
@@ -219,5 +222,63 @@ static void socketClose(const v8::FunctionCallbackInfo<v8::Value> &args) {
     } else {
         fputs("no socket in current context !!!", stderr);
         args.GetReturnValue().Set(-1);
+    }
+}
+
+static bool readHeader(int socket, std::string &result) {
+    std::stringstream ss;
+    int readChars = 0;
+    char twoChars[2];
+    while ((readChars = recv(socket, twoChars, 2, 0)) == 2) {
+        ss << twoChars[0];
+        ss << twoChars[1];
+        if (twoChars[0] == '\r' && twoChars[1] == '\n') {
+            // read two more to check the end of header
+            readChars = recv(socket, twoChars, 2, 0);
+            if (readChars == 2 && twoChars[0] == '\r' && twoChars[1] == '\n') {
+                // header ends  here
+                break;
+            } else {
+                continue; // reading
+            }
+        }
+        if (twoChars[0] == '\n' && twoChars[1] == '\r') {
+            // lets check if that is the end
+            readChars = recv(socket, twoChars, 1, 0);
+            if (readChars == 1 && twoChars[0] == '\n') {
+                ss << twoChars[0];
+                // header ends  here
+                break;
+            } else {
+                continue; // reading
+            }
+        }
+    }
+    if (readChars < 1) {
+        return false;
+    } else {
+        result += ss.str();
+        return true;
+    }
+}
+
+static void socketHeader(const v8::FunctionCallbackInfo<v8::Value> &args) {
+    const auto isolate = args.GetIsolate();
+    v8::HandleScope scope(isolate);
+    const int socket = getSocket(isolate);
+
+    if (socket > 3) {
+        std::string headerString;
+        if (readHeader(socket, headerString)) {
+            v8::Local<v8::String> headerStringValue = v8::String::NewFromUtf8(isolate, headerString.c_str()).ToLocalChecked();
+            args.GetReturnValue().Set(headerStringValue);
+
+        } else {
+            isolate->ThrowError("header is not properly terminated with \\r\\n\\r\\n");
+            return;
+        }
+    } else {
+        fputs("no socket in current context !!!", stderr);
+        isolate->ThrowError("no socket in current context !!!");
     }
 }
