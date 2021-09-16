@@ -6,7 +6,7 @@ development in progress.
 ## V8 SQL patch
 
 V8 SQL patch is in the **v8_sql** folder.  
-It gives a nice sintaxis for entering postgres SQL expressions directly in the JavaScript with string and variable escaping to avoid SQL injections.  
+It gives a nice sintaxis for creating postgres SQL expressions directly in the JavaScript with string and variable escaping to avoid SQL injections.  
 
 for example the following REST handler:
 
@@ -21,12 +21,13 @@ export default async function requestHandler(request, response) {
 }
 ```
 
-Tnen: **const sql = SELECT user WHERE user = 'test';**
+Where: **const sql = SELECT user WHERE user = 'test';**
 Will be equivalent to:
 
 ```
-     sql = ["SELECT user WHERE user = $1 AND role = $2 ","username","test"]
+     const sql = ["SELECT user WHERE user = $1 AND role = $2 ","username","test"]
 ```
+
 
 
 ## build
